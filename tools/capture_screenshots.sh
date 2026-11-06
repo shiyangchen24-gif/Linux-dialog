@@ -13,13 +13,17 @@ XVFB_PID=$!
 trap 'tmux kill-session -t drug 2>/dev/null; kill $XVFB_PID 2>/dev/null' EXIT
 sleep 1
 
-cp "$ROOT/drugs.sample.db" "$ROOT/drugs.db"
-tmux kill-session -t drug 2>/dev/null || true
-tmux new-session -d -s drug -x 90 -y 26 "cd '$ROOT' && ./drug_manager.sh; sleep 1000"
-tmux set -g status off
-xterm -geometry 90x26+0+0 -bw 0 -fa "DejaVu Sans Mono" -fd "Noto Sans Mono CJK TC" \
-      -fs 13 -bg black -fg white -e "tmux attach -t drug" >/dev/null 2>&1 </dev/null &
-sleep 2
+start_app() {   # start_app [環境變數設定]
+    pkill -f "xterm -geometry 90x26" 2>/dev/null || true
+    tmux kill-session -t drug 2>/dev/null || true
+    cp "$ROOT/drugs.sample.db" "$ROOT/drugs.db"
+    tmux new-session -d -s drug -x 90 -y 26 "cd '$ROOT' && env -u ANTHROPIC_API_KEY $1 ./drug_manager.sh; sleep 1000"
+    tmux set -g status off
+    xterm -geometry 90x26+0+0 -bw 0 -fa "DejaVu Sans Mono" -fd "Noto Sans Mono CJK TC" \
+          -fs 13 -bg black -fg white -e "tmux attach -t drug" >/dev/null 2>&1 </dev/null &
+    sleep 2
+}
+start_app
 
 k()    { tmux send-keys -t drug "$@"; sleep 0.4; }          # 送出按鍵
 t()    { tmux send-keys -t drug -l "$1"; sleep 0.4; }       # 送出文字
@@ -47,10 +51,24 @@ k Enter;                                        snap 14_stock_result
 k Enter
 k 6; k Enter;                                   snap 15_alert
 k Enter
+k 7; k Enter;                                   snap 20_ai_no_key
+k Enter
 k 5; k Enter; k End;                            snap 16_delete_select
 k Enter; k Left;                                snap 17_delete_confirm
 k Enter;                                        snap 18_delete_done
 k Enter
 k 0; k Enter;                                   snap 19_exit
 k Enter
+
+# 第二輪：設定 API 金鑰後的 AI 助理畫面
+# 若環境中有真正的 ANTHROPIC_API_KEY 就用它（可截到 AI 實際回覆）；
+# 沒有的話用無效金鑰，示範錯誤處理畫面。
+start_app "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-invalid-demo-key}"
+t "admin123"; k Enter; sleep 2.5
+k 7; k Enter;                                   snap 21_ai_menu
+k 4; k Enter; t "哪些藥品需要優先補貨？";       snap 22_ai_input
+tmux send-keys -t drug Enter; sleep 1
+while tmux capture-pane -p -t drug | grep -q "AI 分析中"; do sleep 1; done
+                                                snap 23_ai_reply
+k Enter; k 0; k Enter; k Enter
 echo "截圖完成：$IMG"

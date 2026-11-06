@@ -2,13 +2,13 @@
 
 - 姓名：＿＿＿＿＿＿　學號：＿＿＿＿＿＿
 - 日期：2026-11-06
-- 環境：Ubuntu 24.04、Bash、dialog 1.3-20240101
+- 環境：Ubuntu 24.04、Bash、dialog 1.3-20240101、curl、jq（AI 助理功能使用）
 
 ---
 
 ## 一、作業目標
 
-用 Bash 和 `dialog` 套件，在終端機中寫出一個有圖形化選單的**藥品管理系統**。系統要能新增、列出、查詢、修改庫存和刪除藥品，也要能提醒庫存不足和快要過期的藥品。
+用 Bash 和 `dialog` 套件，在終端機中寫出一個有圖形化選單的**藥品管理系統**。系統要能新增、列出、查詢、修改庫存和刪除藥品，也要能提醒庫存不足和快要過期的藥品。另外，我加入了 **AI 藥品助理**：透過 Claude API 分析庫存並回答問題。
 
 我最後完成的檔案：
 
@@ -18,6 +18,8 @@
 | `drugs.sample.db` | 我建立的 5 筆範例藥品資料 |
 | `images/` | 執行過程的截圖 |
 | `tools/capture_screenshots.sh` | 我用來自動截圖的腳本 |
+
+> AI 助理功能需要 Claude API 金鑰，金鑰以環境變數設定，不放在專案中。
 
 ---
 
@@ -152,14 +154,15 @@ main_menu() {
     while true; do
         choice=$(dialog --backtitle "$APP_TITLE" --title "主選單" \
             --cancel-label "離開" \
-            --menu "請選擇功能（↑↓ 移動，Enter 確認）：" 16 50 7 \
+            --menu "請選擇功能（↑↓ 移動，Enter 確認）：" 17 50 8 \
             1 "新增藥品"  2 "藥品清單"  3 "查詢藥品" \
             4 "修改庫存（進貨/領用）"  5 "刪除藥品" \
-            6 "庫存與效期警示"  0 "離開系統" \
+            6 "庫存與效期警示"  7 "AI 藥品助理"  0 "離開系統" \
             3>&1 1>&2 2>&3) || choice=0
         case "$choice" in
             1) add_drug ;;     2) list_drugs ;;   3) search_drug ;;
             4) update_stock ;; 5) delete_drug ;;  6) alert_report ;;
+            7) ai_assistant ;;
             0) dialog --backtitle "$APP_TITLE" --title "離開" \
                    --yesno "確定要離開藥品管理系統嗎？" 7 40 && break ;;
         esac
@@ -305,7 +308,114 @@ if dialog --title "確認刪除" --defaultno \
 fi
 ```
 
-### 步驟 14：程式進入點
+### 步驟 14：AI 藥品助理（呼叫 Claude API）
+
+主程式完成後，我再加入 AI 助理功能。概念是把**問題和目前的藥品資料**一起送給 AI，再把 AI 的回答用 dialog 顯示出來：
+
+```
+dialog 選單／輸入框 → Bash 變數 → jq 組 JSON → curl 呼叫 Claude API → jq 取出回答 → dialog --textbox 顯示
+```
+
+**(1) 安裝套件、設定金鑰**
+
+```bash
+sudo apt install -y curl jq
+export ANTHROPIC_API_KEY="你的金鑰"     # 金鑰不寫進程式，也不上傳 GitHub
+```
+
+我在設定區多加一個變數，方便以後換模型：
+
+```bash
+AI_MODEL="${AI_MODEL:-claude-opus-5-5}"
+```
+
+**(2) 寫 `ai_ask` 函式：組 JSON、呼叫 API、取出回答**
+
+```bash
+ai_ask() {   # ai_ask "問題" → 輸出 AI 的回答文字
+    local body resp
+    body=$(jq -n --arg model "$AI_MODEL" --arg q "$1" \
+        --rawfile db "$DB_FILE" --arg today "$(date +%F)" '{
+        model: $model,
+        max_tokens: 4000,
+        output_config: {effort: "low"},
+        fallbacks: "default",
+        system: "你是藥局庫存管理助理。只根據提供的藥品資料回答，使用繁體中文，回答精簡、條列清楚，不使用 Markdown 語法。涉及用藥或醫療判斷時，提醒以醫師或藥師判斷為準。",
+        messages: [{role: "user",
+            content: ("今天日期：" + $today
+                + "\n藥品資料（編號|名稱|類別|數量|單位|有效期限|位置）：\n" + $db
+                + "\n問題：" + $q)}]
+    }')
+
+    resp=$(curl -s --max-time 120 https://api.anthropic.com/v1/messages \
+        -H "Content-Type: application/json" \
+        -H "x-api-key: $ANTHROPIC_API_KEY" \
+        -H "anthropic-version: 2026-10-21" \
+        -H "anthropic-beta: server-side-fallback-2026-07-01" \
+        -d "$body") || { echo "連線失敗，請檢查網路。"; return 1; }
+
+    if [ "$(jq -r '.stop_reason // empty' <<< "$resp" 2>/dev/null)" = "refusal" ]; then
+        echo "AI 無法回答這個問題，請換個方式提問。"
+        return 1
+    fi
+    # 回應的 content 可能含 thinking 區塊，只取 type 為 text 的部分
+    jq -r '.content[]? | select(.type == "text") | .text' <<< "$resp" 2>/dev/null | grep . \
+        || { echo "呼叫失敗：$(jq -r '.error.message // "無法解析回應"' <<< "$resp" 2>/dev/null)"; return 1; }
+}
+```
+
+幾個設計重點：
+
+- **用 `jq -n --arg` 組 JSON**：問題和藥品資料裡有中文、引號、換行。如果直接用字串拼接，JSON 很容易壞掉；`jq` 會自動處理跳脫字元。`--rawfile` 可以把整個 `drugs.db` 讀成一個字串。
+- **把今天日期一起送出**：AI 本身不知道今天幾號，有了日期才能判斷藥品是否過期。
+- **`system` 提示**：限制 AI 只根據資料回答、用繁體中文，而且不要用 Markdown，因為 `--textbox` 不會轉換 Markdown，`**` 這類符號會直接顯示出來。
+- **`effort: "low"`**：這類問答不需要深度推理，回應比較快，費用也比較低。
+- **`fallbacks: "default"`**（搭配 `anthropic-beta` 標頭）：AI 因安全機制拒絕回答時，伺服器會自動改用其他模型再試。
+- **錯誤處理**：分成連線失敗、AI 拒絕回答、API 錯誤（例如金鑰錯誤）三種情況，都會顯示可以看懂的訊息，不會讓程式當掉。
+
+**(3) 寫 `ai_assistant` 介面函式**
+
+```bash
+ai_assistant() {
+    local question
+    for cmd in curl jq; do
+        command -v "$cmd" >/dev/null || { msg "缺少套件" "AI 助理需要 $cmd，請先安裝：\n\nsudo apt install -y curl jq"; return; }
+    done
+    if [ -z "$ANTHROPIC_API_KEY" ]; then
+        msg "尚未設定 API 金鑰" "請先在終端機設定 Claude API 金鑰再啟動程式：\n\nexport ANTHROPIC_API_KEY=\"你的金鑰\"\n./drug_manager.sh"
+        return
+    fi
+
+    question=$(dialog --backtitle "$APP_TITLE" --title "AI 藥品助理" \
+        --menu "請選擇常用問題，或選「自行輸入」：" 14 64 5 \
+        1 "分析目前庫存，列出需要優先補貨的藥品" \
+        2 "列出已過期和即將到期的藥品，並建議處理方式" \
+        3 "管制藥品的庫存管理要注意什麼" \
+        4 "自行輸入問題" \
+        3>&1 1>&2 2>&3) || return
+    case "$question" in
+        1) question="分析目前庫存，列出需要優先補貨的藥品並說明原因" ;;
+        2) question="列出已過期和即將到期的藥品，並建議處理方式" ;;
+        3) question="根據目前資料，管制藥品的庫存管理要注意什麼" ;;
+        4) question=$(dialog --backtitle "$APP_TITLE" --title "AI 藥品助理" \
+               --inputbox "請輸入問題：" 8 60 3>&1 1>&2 2>&3) || return
+           [ -z "$question" ] && return ;;
+    esac
+
+    # --infobox 顯示後不等按鍵，直接往下執行，適合當「處理中」提示
+    dialog --backtitle "$APP_TITLE" --title "AI 藥品助理" \
+        --infobox "AI 分析中，請稍候...\n\n問題：$question" 7 64
+    ai_ask "$question" > "$TMP"
+    dialog --backtitle "$APP_TITLE" --title "AI 回覆" \
+        --exit-label "返回" --textbox "$TMP" 22 80
+}
+```
+
+- 我先提供 3 個常用問題，不用每次打字；也保留「自行輸入」的選項。
+- 呼叫 API 需要幾秒鐘，所以先用 `--infobox` 顯示「AI 分析中」。它和 `--msgbox` 的差別是不會等使用者按鍵。
+- **AI 只負責回答，不會修改 `drugs.db`**。藥品資料關係到用藥安全，進貨、領用、刪除還是要由人操作並確認。
+
+### 步驟 15：程式進入點
 
 檔案最後依序呼叫三個函式：
 
@@ -407,6 +517,26 @@ cp drugs.sample.db drugs.db       # 載入範例資料
 
 ![離開](images/19_exit.png)
 
+### 20～23. AI 藥品助理
+
+**沒有設定 API 金鑰時**，選 `7` 會顯示設定方式，不會出錯：
+
+![未設定金鑰](images/20_ai_no_key.png)
+
+**設定金鑰後**，重新啟動程式，選 `7` 進入 AI 助理的問題選單：
+
+![AI 問題選單](images/21_ai_menu.png)
+
+選「4 自行輸入問題」，輸入「哪些藥品需要優先補貨？」：
+
+![輸入問題](images/22_ai_input.png)
+
+送出後先顯示「AI 分析中」，接著用 `--textbox` 顯示回覆。下面這張截圖是**使用無效金鑰測試錯誤處理**的結果：API 回傳的錯誤訊息被讀出並正常顯示，按「返回」就能回到主選單，程式不會當掉。
+
+![API 錯誤處理](images/23_ai_reply.png)
+
+> 使用有效金鑰時，這個畫面會顯示 AI 的分析內容。之後只要設定好金鑰，再執行 `./tools/capture_screenshots.sh`，就會自動重新截出 AI 實際回覆的畫面。
+
 ---
 
 ## 四、遇到的問題與解決方法
@@ -425,14 +555,19 @@ cp drugs.sample.db drugs.db       # 載入範例資料
 | 取不到使用者輸入 | dialog 把輸入送到 stderr，`$( )` 只抓 stdout | 加上 `3>&1 1>&2 2>&3` 交換 |
 | 日期格式不一致 | `--calendar` 預設回傳 `日/月/年` | 加上 `--date-format "%Y-%m-%d"` |
 | 編號 `008`、`009` 會算錯 | 開頭是 0 的數字，Bash 會當成八進位 | 改用 `$(( 10#$last + 1 ))` |
+| 送給 AI 的 JSON 格式壞掉 | 問題和資料含中文、引號、換行，字串拼接容易出錯 | 用 `jq -n --arg` / `--rawfile` 組 JSON |
+| AI 回應不一定只有文字 | 回應的 `content` 是陣列，可能還有 thinking 區塊 | 用 `jq` 篩選 `type == "text"` 的區塊 |
+| AI 回答中的 `**粗體**` 會原樣顯示 | `--textbox` 只顯示純文字 | 在 system 提示中要求不使用 Markdown |
+| 金鑰外洩風險 | 金鑰寫進程式碼會跟著上傳 GitHub | 改用環境變數 `ANTHROPIC_API_KEY` |
 
 ## 五、心得
 
 1. 原本以為終端機只能做文字指令，用了 `dialog` 才發現 Shell Script 也能做出有選單、表單、日曆的介面，而且只需要一個套件。
 2. 學到最重要的觀念是 **stdout / stderr 和檔案描述子**。`3>&1 1>&2 2>&3` 要把每個 fd 的指向畫出來才比較好理解。
 3. 處理中文時要注意「字元數」和「顯示寬度」不一樣，這是我之前沒想過的。
-4. 每個 dialog 元件的參數順序都不太一樣（特別是 `--form` 每欄要 8 個參數），寫之前查 `man dialog` 可以少走很多冤枉路。
-5. 之後可以再改進的地方：
+4. 加入 AI 助理後發現，Shell Script 不只能做介面，也能透過 `curl` + `jq` 串接網路 API。最重要的是把 AI 定位成「提供建議」，資料修改還是由人確認，這在藥品管理這種需要安全的情境很重要。
+5. 每個 dialog 元件的參數順序都不太一樣（特別是 `--form` 每欄要 8 個參數），寫之前查 `man dialog` 可以少走很多冤枉路。
+6. 之後可以再改進的地方：
    - 用 `--checklist` 一次刪除多筆
    - 把每次進貨／領用寫進紀錄檔，再用 `--tailbox` 查看歷史
    - 改用 `sqlite3` 存資料，支援更複雜的查詢
@@ -453,5 +588,6 @@ cp drugs.sample.db drugs.db       # 載入範例資料
 | `--inputbox` | `--inputbox 文字 高 寬` | 輸入的字串 | 查詢、數量 |
 | `--msgbox` | `--msgbox 文字 高 寬` | 無 | 各種提示訊息 |
 | `--yesno` | `--yesno 文字 高 寬` | 結束代碼 0／1 | 刪除、離開確認 |
+| `--infobox` | `--infobox 文字 高 寬` | 無（不等按鍵） | AI 分析中提示 |
 
 > 截圖是用 `tools/capture_screenshots.sh` 自動擷取的：在虛擬螢幕（Xvfb）中開 xterm 執行程式，用 `tmux send-keys` 模擬按鍵，再用 ImageMagick 的 `import` 截圖。

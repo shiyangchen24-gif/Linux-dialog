@@ -13,6 +13,7 @@ DB_FILE="${DB_FILE:-$(dirname "$0")/drugs.db}"
 ADMIN_PASS="${ADMIN_PASS:-admin123}"
 LOW_STOCK=20          # 低於此數量視為庫存不足
 EXPIRE_DAYS=90        # 幾天內到期視為即將到期
+AI_MODEL="${AI_MODEL:-claude-opus-5-5}"   # AI 助理使用的模型
 TMP=$(mktemp)
 trap 'rm -f "$TMP"; clear' EXIT
 
@@ -203,19 +204,87 @@ alert_report() {
         --exit-label "返回" --textbox "$TMP" 20 60
 }
 
+# ---------- 9. AI 藥品助理 ----------
+# 把問題和目前的藥品資料送到 Claude API，回答只顯示給使用者看，
+# 不會修改 drugs.db（進貨、領用、刪除仍需人工操作）。
+ai_ask() {   # ai_ask "問題" → 輸出 AI 的回答文字
+    local body resp
+    body=$(jq -n --arg model "$AI_MODEL" --arg q "$1" \
+        --rawfile db "$DB_FILE" --arg today "$(date +%F)" '{
+        model: $model,
+        max_tokens: 4000,
+        output_config: {effort: "low"},
+        fallbacks: "default",
+        system: "你是藥局庫存管理助理。只根據提供的藥品資料回答，使用繁體中文，回答精簡、條列清楚，不使用 Markdown 語法。涉及用藥或醫療判斷時，提醒以醫師或藥師判斷為準。",
+        messages: [{role: "user",
+            content: ("今天日期：" + $today
+                + "\n藥品資料（編號|名稱|類別|數量|單位|有效期限|位置）：\n" + $db
+                + "\n問題：" + $q)}]
+    }')
+
+    resp=$(curl -s --max-time 120 https://api.anthropic.com/v1/messages \
+        -H "Content-Type: application/json" \
+        -H "x-api-key: $ANTHROPIC_API_KEY" \
+        -H "anthropic-version: 2026-10-21" \
+        -H "anthropic-beta: server-side-fallback-2026-07-01" \
+        -d "$body") || { echo "連線失敗，請檢查網路。"; return 1; }
+
+    if [ "$(jq -r '.stop_reason // empty' <<< "$resp" 2>/dev/null)" = "refusal" ]; then
+        echo "AI 無法回答這個問題，請換個方式提問。"
+        return 1
+    fi
+    # 回應的 content 可能含 thinking 區塊，只取 type 為 text 的部分
+    jq -r '.content[]? | select(.type == "text") | .text' <<< "$resp" 2>/dev/null | grep . \
+        || { echo "呼叫失敗：$(jq -r '.error.message // "無法解析回應"' <<< "$resp" 2>/dev/null)"; return 1; }
+}
+
+ai_assistant() {
+    local question
+    for cmd in curl jq; do
+        command -v "$cmd" >/dev/null || { msg "缺少套件" "AI 助理需要 $cmd，請先安裝：\n\nsudo apt install -y curl jq"; return; }
+    done
+    if [ -z "$ANTHROPIC_API_KEY" ]; then
+        msg "尚未設定 API 金鑰" "請先在終端機設定 Claude API 金鑰再啟動程式：\n\nexport ANTHROPIC_API_KEY=\"你的金鑰\"\n./drug_manager.sh"
+        return
+    fi
+
+    question=$(dialog --backtitle "$APP_TITLE" --title "AI 藥品助理" \
+        --menu "請選擇常用問題，或選「自行輸入」：" 14 64 5 \
+        1 "分析目前庫存，列出需要優先補貨的藥品" \
+        2 "列出已過期和即將到期的藥品，並建議處理方式" \
+        3 "管制藥品的庫存管理要注意什麼" \
+        4 "自行輸入問題" \
+        3>&1 1>&2 2>&3) || return
+    case "$question" in
+        1) question="分析目前庫存，列出需要優先補貨的藥品並說明原因" ;;
+        2) question="列出已過期和即將到期的藥品，並建議處理方式" ;;
+        3) question="根據目前資料，管制藥品的庫存管理要注意什麼" ;;
+        4) question=$(dialog --backtitle "$APP_TITLE" --title "AI 藥品助理" \
+               --inputbox "請輸入問題：" 8 60 3>&1 1>&2 2>&3) || return
+           [ -z "$question" ] && return ;;
+    esac
+
+    dialog --backtitle "$APP_TITLE" --title "AI 藥品助理" \
+        --infobox "AI 分析中，請稍候...\n\n問題：$question" 7 64
+    ai_ask "$question" > "$TMP"
+    dialog --backtitle "$APP_TITLE" --title "AI 回覆" \
+        --exit-label "返回" --textbox "$TMP" 22 80
+}
+
 # ---------- 主選單 ----------
 main_menu() {
     local choice
     while true; do
         choice=$(dialog --backtitle "$APP_TITLE" --title "主選單" \
             --cancel-label "離開" \
-            --menu "請選擇功能（↑↓ 移動，Enter 確認）：" 16 50 7 \
+            --menu "請選擇功能（↑↓ 移動，Enter 確認）：" 17 50 8 \
             1 "新增藥品" \
             2 "藥品清單" \
             3 "查詢藥品" \
             4 "修改庫存（進貨/領用）" \
             5 "刪除藥品" \
             6 "庫存與效期警示" \
+            7 "AI 藥品助理" \
             0 "離開系統" \
             3>&1 1>&2 2>&3) || choice=0
 
@@ -226,6 +295,7 @@ main_menu() {
             4) update_stock ;;
             5) delete_drug ;;
             6) alert_report ;;
+            7) ai_assistant ;;
             0) dialog --backtitle "$APP_TITLE" --title "離開" \
                    --yesno "確定要離開藥品管理系統嗎？" 7 40 && break ;;
         esac
