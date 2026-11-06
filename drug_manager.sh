@@ -268,7 +268,7 @@ ai_assistant() {
         --infobox "AI 分析中，請稍候...\n\n問題：$question" 7 64
     ai_ask "$question" > "$TMP"
     dialog --backtitle "$APP_TITLE" --title "AI 回覆" \
-        --exit-label "返回" --textbox "$TMP" 22 80
+        --exit-label "返回" --textbox "$TMP" 20 76
 }
 
 # ---------- 主選單 ----------

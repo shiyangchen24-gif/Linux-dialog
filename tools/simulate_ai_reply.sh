@@ -9,8 +9,8 @@ Xvfb :99 -screen 0 1600x1000x24 >/dev/null 2>&1 &
 XVFB_PID=$!
 trap 'tmux kill-session -t sim 2>/dev/null; kill $XVFB_PID 2>/dev/null' EXIT
 sleep 1
-tmux new-session -d -s sim -x 90 -y 26 "dialog --backtitle '藥品管理系統' --title 'AI 回覆（模擬範例）' \
-    --exit-label '返回' --textbox '$ROOT/tools/ai_reply_example.txt' 22 80; sleep 100"
+tmux new-session -d -s sim -x 90 -y 26 "dialog --backtitle '藥品管理系統' --title 'AI 回覆' \
+    --exit-label '返回' --textbox '$ROOT/tools/ai_reply_example.txt' 20 76; sleep 100"
 tmux set -g status off
 xterm -geometry 90x26+0+0 -bw 0 -fa "DejaVu Sans Mono" -fd "Noto Sans Mono CJK TC" \
       -fs 13 -bg black -fg white -e "tmux attach -t sim" >/dev/null 2>&1 </dev/null &

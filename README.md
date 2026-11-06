@@ -407,7 +407,7 @@ ai_assistant() {
         --infobox "AI 分析中，請稍候...\n\n問題：$question" 7 64
     ai_ask "$question" > "$TMP"
     dialog --backtitle "$APP_TITLE" --title "AI 回覆" \
-        --exit-label "返回" --textbox "$TMP" 22 80
+        --exit-label "返回" --textbox "$TMP" 20 76
 }
 ```
 
@@ -539,7 +539,7 @@ cp drugs.sample.db drugs.db       # 載入範例資料
 
 ### 24～25. AI 回覆畫面（模擬範例）
 
-> ⚠️ **以下兩張是模擬畫面，不是 AI 實際回覆。** 因為製作筆記時沒有可用的 API 金鑰，我依照範例資料寫了一份「預期的回答」（[`tools/ai_reply_example.txt`](tools/ai_reply_example.txt)），用和程式相同的 `--textbox` 版面顯示，方便說明功能完成後的樣子。標題也標上「模擬範例」以便區分。
+> ⚠️ **以下兩張是模擬畫面，不是 AI 實際回覆。** 因為製作筆記時沒有可用的 API 金鑰，我依照範例資料寫了一份「預期的回答」（[`tools/ai_reply_example.txt`](tools/ai_reply_example.txt)），用和程式相同的 `--textbox` 版面顯示，方便說明功能完成後的樣子。
 
 模擬情境：選「4 自行輸入問題」，輸入「哪些藥品需要優先補貨？」。根據範例資料，預期 AI 會指出：
 - **D004 嗎啡注射液**只剩 8 支，而且管制藥品採購較費時，應最優先補貨
